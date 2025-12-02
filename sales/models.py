@@ -482,7 +482,7 @@ class Sale(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     sale_number = models.CharField(max_length=100, unique=True, blank=True)
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='sales')
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='sales', null=True, blank=True)
     
     # Sale details
     sale_date = models.DateField()
@@ -635,16 +635,65 @@ def log_customer_changes(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=Sale)
 def log_sale_changes(sender, instance, created, **kwargs):
-    """Log sale creation and updates"""
+    """Log sale creation and updates and auto-generate Revenue records"""
     if created:
+        customer_info = instance.customer.name if instance.customer else 'No Customer'
         AuditLog.log_action(
             user=instance.created_by,
             action='create',
             model_name='Sale',
             object_id=str(instance.id),
             object_str=str(instance),
-            description=f'Sale created: {instance.sale_number} for {instance.customer.name}'
+            description=f'Sale created: {instance.sale_number} for {customer_info}'
         )
+    
+    # Auto-generate or update Revenue record for this sale (only if customer exists)
+    if instance.customer:
+        try:
+            from datetime import datetime as dt, timedelta
+            
+            # Determine the period (monthly by default)
+            sale_date = instance.sale_date
+            start_date = sale_date.replace(day=1)  # First day of month
+            
+            # Last day of month
+            if sale_date.month == 12:
+                end_date = sale_date.replace(year=sale_date.year + 1, month=1, day=1) - timedelta(days=1)
+            else:
+                end_date = sale_date.replace(month=sale_date.month + 1, day=1) - timedelta(days=1)
+            
+            # Get or create Revenue record
+            revenue, _ = Revenue.objects.get_or_create(
+                customer=instance.customer,
+                frequency='monthly',
+                start_date=start_date,
+                defaults={
+                    'end_date': end_date,
+                    'created_by': instance.created_by,
+                    'total_revenue': 0,
+                    'total_transactions': 0,
+                    'total_tax': 0,
+                    'total_gst': 0,
+                }
+            )
+            
+            # Recalculate revenue for this period (only confirmed/dispatched/delivered)
+            from django.db.models import Sum
+            period_sales = Sale.objects.filter(
+                customer=instance.customer,
+                sale_date__gte=start_date,
+                sale_date__lte=end_date,
+                status__in=['confirmed', 'dispatched', 'delivered']
+            )
+            
+            revenue.total_revenue = period_sales.aggregate(Sum('total_amount'))['total_amount__sum'] or 0
+            revenue.total_transactions = period_sales.count()
+            revenue.total_tax = period_sales.aggregate(Sum('total_tax'))['total_tax__sum'] or 0
+            revenue.total_gst = period_sales.aggregate(Sum('total_gst'))['total_gst__sum'] or 0
+            revenue.save()
+        except Exception as e:
+            # Silently fail to not break the sale save
+            pass
 
 
 @receiver(post_save, sender=Transaction)
@@ -698,4 +747,31 @@ def log_customer_deletion(sender, instance, **kwargs):
         object_id=str(instance.id),
         object_str=str(instance),
         description=f'Customer deleted: {instance.name}'
+    )
+
+
+@receiver(post_save, sender=SaleItem)
+def log_saleitem_changes(sender, instance, created, **kwargs):
+    """Log sale item creation"""
+    if created:
+        AuditLog.log_action(
+            user=None,  # SaleItem doesn't have a created_by field
+            action='create',
+            model_name='SaleItem',
+            object_id=str(instance.id),
+            object_str=str(instance),
+            description=f'Sale item created: {instance.item.name} x {instance.quantity}'
+        )
+
+
+@receiver(post_delete, sender=SaleItem)
+def log_saleitem_deletion(sender, instance, **kwargs):
+    """Log sale item deletion"""
+    AuditLog.log_action(
+        user=None,
+        action='delete',
+        model_name='SaleItem',
+        object_id=str(instance.id),
+        object_str=str(instance),
+        description=f'Sale item deleted: {instance.item.name} x {instance.quantity}'
     )

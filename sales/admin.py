@@ -12,6 +12,8 @@ from django.http import HttpResponse
 from io import BytesIO
 from reportlab.platypus import Image as RLImage
 from reportlab.lib.utils import ImageReader
+from reportlab.lib.pagesizes import letter
+from datetime import datetime
 
 
 # ============ EXPORT ACTIONS ============
@@ -163,12 +165,12 @@ def generate_sales_report_pdf_with_chart(modeladmin, request, queryset):
 
     # Embed image
     img = ImageReader(img_buf)
-    elements.append(RLImage(img, width=6 * inch, height=3 * inch))
+    elements.append(RLImage(img_buf, width=6 * inch, height=3 * inch))
     elements.append(Spacer(1, 0.2 * inch))
 
     # Summary
     total_all = sum(totals)
-    summary = Paragraph(f"<b>Total Sales (selected):</b> ${total_all:,.2f}", styles['Normal'])
+    summary = Paragraph(f"<b>Total Sales (selected):</b> SLe{total_all:,.2f}", styles['Normal'])
     elements.append(summary)
 
     doc.build(elements)
@@ -386,10 +388,10 @@ class ReceiptAdmin(admin.ModelAdmin):
 @admin.register(Revenue)
 class RevenueAdmin(admin.ModelAdmin):
     """Revenue Tracking Admin"""
-    list_display = ('get_customer', 'frequency', 'total_revenue', 'start_date', 'end_date', 'total_transactions')
+    list_display = ('get_customer', 'frequency', 'get_total_revenue', 'start_date', 'end_date', 'total_transactions')
     list_filter = ('frequency', 'start_date')
     search_fields = ('customer__name',)
-    readonly_fields = ('id', 'created_at', 'total_revenue')
+    readonly_fields = ('id', 'created_at', 'total_revenue', 'get_formatted_revenue', 'get_formatted_tax', 'get_formatted_gst')
     date_hierarchy = 'start_date'
     
     fieldsets = (
@@ -400,13 +402,44 @@ class RevenueAdmin(admin.ModelAdmin):
             'fields': ('start_date', 'end_date')
         }),
         ('Revenue Summary', {
-            'fields': ('total_revenue', 'total_transactions', 'total_tax', 'total_gst')
+            'fields': ('get_formatted_revenue', 'total_transactions', 'get_formatted_tax', 'get_formatted_gst')
         }),
         ('Metadata', {
             'fields': ('created_at', 'created_by'),
             'classes': ('collapse',)
         }),
     )
+    
+    def get_customer(self, obj):
+        return obj.customer.name
+    get_customer.short_description = 'Customer'
+    
+    def get_total_revenue(self, obj):
+        """Display total revenue formatted as currency"""
+        revenue = float(obj.total_revenue or 0)
+        return format_html(
+            '<strong style="color: #366092; font-size: 14px;">SLe{}</strong>',
+            f'{revenue:,.2f}'
+        )
+    get_total_revenue.short_description = 'Total Revenue (SLe)'
+    
+    def get_formatted_revenue(self, obj):
+        """Display formatted revenue in detail view"""
+        revenue = float(obj.total_revenue or 0)
+        return f'SLe{revenue:,.2f}'
+    get_formatted_revenue.short_description = 'Total Revenue (SLe)'
+    
+    def get_formatted_tax(self, obj):
+        """Display formatted tax in detail view"""
+        tax = float(obj.total_tax or 0)
+        return f'SLe{tax:,.2f}'
+    get_formatted_tax.short_description = 'Total Tax (SLe)'
+    
+    def get_formatted_gst(self, obj):
+        """Display formatted GST in detail view"""
+        gst = float(obj.total_gst or 0)
+        return f'SLe{gst:,.2f}'
+    get_formatted_gst.short_description = 'Total GST (SLe)'
     
     def get_customer(self, obj):
         return obj.customer.name
@@ -671,13 +704,13 @@ class SaleItemInline(admin.TabularInline):
 @admin.register(Sale)
 class SaleAdmin(admin.ModelAdmin):
     """Sales Management Admin"""
-    list_display = ('sale_number', 'get_customer', 'sale_date', 'status_badge', 'total_amount', 'get_created_by')
+    list_display = ('sale_number', 'get_customer', 'sale_date', 'status_badge', 'get_total_amount', 'get_created_by')
     list_filter = ('status', 'sale_date', 'created_at')
     search_fields = ('sale_number', 'customer__name')
     readonly_fields = ('id', 'sale_number', 'subtotal', 'total_tax', 'total_gst', 'total_amount', 'created_at', 'updated_at')
     inlines = [SaleItemInline]
     date_hierarchy = 'sale_date'
-    actions = [export_to_csv, export_to_excel, export_to_pdf]
+    actions = [export_to_csv, export_to_excel, export_to_pdf, generate_invoice_pdf, view_sales_chart, generate_sales_report_pdf_with_chart]
     
     fieldsets = (
         ('Sale Information', {
@@ -699,12 +732,21 @@ class SaleAdmin(admin.ModelAdmin):
     )
     
     def get_customer(self, obj):
-        return obj.customer.name
+        return obj.customer.name if obj.customer else '—'
     get_customer.short_description = 'Customer'
     
     def get_created_by(self, obj):
         return obj.created_by.username
     get_created_by.short_description = 'Salesperson'
+    
+    def get_total_amount(self, obj):
+        """Display total amount formatted as currency"""
+        amount = float(obj.total_amount or 0)
+        return format_html(
+            '<strong style="color: #366092; font-size: 14px;">SLe{}</strong>',
+            f'{amount:,.2f}'
+        )
+    get_total_amount.short_description = 'Total Amount (SLe)'
     
     def status_badge(self, obj):
         colors = {
@@ -715,7 +757,13 @@ class SaleAdmin(admin.ModelAdmin):
             'cancelled': 'red',
             'returned': 'gray'
         }
-        return format_html(f'<span style="color: {colors.get(obj.status)}; font-weight: bold;">{obj.get_status_display()}</span>')
+        color = colors.get(obj.status, 'gray')
+        status_text = obj.get_status_display()
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            status_text
+        )
     status_badge.short_description = 'Status'
     
     def save_model(self, request, obj, form, change):
@@ -727,7 +775,7 @@ class SaleAdmin(admin.ModelAdmin):
 @admin.register(SaleItem)
 class SaleItemAdmin(admin.ModelAdmin):
     """Sale Item Details Admin"""
-    list_display = ('get_sale', 'item', 'quantity', 'unit_price', 'line_total')
+    list_display = ('get_sale', 'item', 'quantity', 'get_unit_price', 'get_line_total')
     list_filter = ('sale__sale_date', 'item__category')
     search_fields = ('sale__sale_number', 'item__name')
     readonly_fields = ('id', 'tax_amount', 'gst_amount', 'line_total', 'created_at')
@@ -747,6 +795,25 @@ class SaleItemAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
+    
+    def get_sale(self, obj):
+        return obj.sale.sale_number
+    get_sale.short_description = 'Sale Number'
+    
+    def get_unit_price(self, obj):
+        """Display unit price formatted as currency"""
+        price = float(obj.unit_price or 0)
+        return format_html('SLe{}', f'{price:,.2f}')
+    get_unit_price.short_description = 'Unit Price (SLe)'
+    
+    def get_line_total(self, obj):
+        """Display line total formatted as currency with bold styling"""
+        total = float(obj.line_total or 0)
+        return format_html(
+            '<strong style="color: #366092;">SLe{}</strong>',
+            f'{total:,.2f}'
+        )
+    get_line_total.short_description = 'Line Total (SLe)'
     
     def get_sale(self, obj):
         return obj.sale.sale_number

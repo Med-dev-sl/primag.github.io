@@ -4,17 +4,18 @@ Supports CSV, Excel, and PDF exports with PriMag branding.
 """
 import csv
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from django.http import HttpResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from reportlab.lib.pagesizes import letter, A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
 from django.conf import settings
 
 
@@ -342,16 +343,16 @@ class ReceiptPDFGenerator(PriMagReporter):
             # Transaction details as simple text instead of table
             transaction_text = f"""
             <b>Transaction Details:</b><br/>
-            Transaction Amount: ${transaction.amount:.2f}<br/>
+            Transaction Amount: SLe{transaction.amount:.2f}<br/>
             """
             
             if transaction.is_taxable and transaction.tax_amount:
-                transaction_text += f"Tax ({transaction.tax_percentage or 0}%): ${transaction.tax_amount:.2f}<br/>"
+                transaction_text += f"Tax ({transaction.tax_percentage or 0}%): SLe{transaction.tax_amount:.2f}<br/>"
             
             if transaction.gst_applicable and transaction.gst_amount:
-                transaction_text += f"GST ({transaction.gst_percentage or 0}%): ${transaction.gst_amount:.2f}<br/>"
+                transaction_text += f"GST ({transaction.gst_percentage or 0}%): SLe{transaction.gst_amount:.2f}<br/>"
             
-            transaction_text += f"<b>Total Amount: ${transaction.total_amount:.2f}</b>"
+            transaction_text += f"<b>Total Amount: SLe{transaction.total_amount:.2f}</b>"
             elements.append(Paragraph(transaction_text, normal_style))
             elements.append(Spacer(1, 0.15*inch))
         
@@ -455,10 +456,10 @@ class InvoicePDFGenerator(PriMagReporter):
         # Sale summary
         summary_text = f"""
         <b>Summary</b><br/>
-        Subtotal: ${sale.subtotal:.2f}<br/>
-        Total Tax: ${sale.total_tax:.2f}<br/>
-        Total GST: ${sale.total_gst:.2f}<br/>
-        <b>Total Amount Due: ${sale.total_amount:.2f}</b>
+        Subtotal: SLe{sale.subtotal:.2f}<br/>
+        Total Tax: SLe{sale.total_tax:.2f}<br/>
+        Total GST: SLe{sale.total_gst:.2f}<br/>
+        <b>Total Amount Due: SLe{sale.total_amount:.2f}</b>
         """
         elements.append(Paragraph(summary_text, normal_style))
         elements.append(Spacer(1, 0.2*inch))
@@ -471,10 +472,10 @@ class InvoicePDFGenerator(PriMagReporter):
                 for si in items.all():
                     desc = getattr(si.item, 'name', str(si.item)) if si.item else '—'
                     qty = f"{si.quantity}"
-                    unit = f"${si.unit_price:.2f}" if getattr(si, 'unit_price', None) is not None else '—'
-                    tax = f"${si.tax_amount:.2f}" if getattr(si, 'tax_amount', None) is not None else '$0.00'
-                    gst = f"${si.gst_amount:.2f}" if getattr(si, 'gst_amount', None) is not None else '$0.00'
-                    line = f"${si.line_total:.2f}" if getattr(si, 'line_total', None) is not None else '—'
+                    unit = f"SLe{si.unit_price:.2f}" if getattr(si, 'unit_price', None) is not None else '—'
+                    tax = f"SLe{si.tax_amount:.2f}" if getattr(si, 'tax_amount', None) is not None else 'SLe0.00'
+                    gst = f"SLe{si.gst_amount:.2f}" if getattr(si, 'gst_amount', None) is not None else 'SLe0.00'
+                    line = f"SLe{si.line_total:.2f}" if getattr(si, 'line_total', None) is not None else '—'
                     rows.append([desc, qty, unit, tax, gst, line])
 
                 if len(rows) > 1:
@@ -494,7 +495,64 @@ class InvoicePDFGenerator(PriMagReporter):
             # If anything goes wrong building the table, skip it to keep invoice generation robust
             pass
 
-        # Footer and payment terms
+        # Try to embed a customer sales chart (last 12 months)
+        try:
+            from django.db.models import Sum
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+
+            # Determine date range (last 12 months)
+            end = sale.sale_date or datetime.now()
+            start = end - timedelta(days=365)
+
+            # Fetch monthly totals for this customer
+            from sales.models import Sale as SaleModel
+
+            qs = (SaleModel.objects
+                  .filter(customer=sale.customer, sale_date__gte=start, sale_date__lte=end)
+                  .values('sale_date__year', 'sale_date__month')
+                  .annotate(total=Sum('total_amount'))
+                  .order_by('sale_date__year', 'sale_date__month'))
+
+            months = []
+            totals = []
+            if qs:
+                for item in qs:
+                    year = int(item['sale_date__year'])
+                    month = int(item['sale_date__month'])
+                    months.append(f"{year}-{month:02d}")
+                    totals.append(float(item['total'] or 0))
+
+            if totals and len(totals) > 0:
+                fig, ax = plt.subplots(figsize=(6, 2.5), dpi=150)
+                ax.plot(months, totals, marker='o', linewidth=1.5, color='#366092')
+                ax.fill_between(range(len(months)), totals, alpha=0.3, color='#366092')
+                ax.set_title('Customer Sales History (Last 12 Months)', fontsize=10, fontweight='bold')
+                ax.set_ylabel('Amount (SLe)', fontsize=9)
+                ax.set_xlabel('Month', fontsize=9)
+                ax.tick_params(axis='both', labelsize=8)
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+
+                # Save chart to BytesIO buffer
+                chart_buffer = BytesIO()
+                fig.savefig(chart_buffer, format='png', dpi=150, bbox_inches='tight')
+                plt.close(fig)
+                chart_buffer.seek(0)
+
+                # Embed chart image into PDF
+                img = ImageReader(chart_buffer)
+                elements.append(Spacer(1, 0.15*inch))
+                elements.append(Paragraph('<b>Sales History</b>', heading_style))
+                elements.append(Spacer(1, 0.1*inch))
+                elements.append(RLImage(img, width=5.5*inch, height=2.3*inch))
+        except ImportError:
+            # matplotlib not installed; skip chart
+            pass
+        except Exception:
+            # Chart generation failed; skip to keep invoice robust
+            pass
         footer = f"""
         <font size="9">Payment due on receipt. For questions, contact {InvoicePDFGenerator.PRIMAG_COMPANY['email']} or {InvoicePDFGenerator.PRIMAG_COMPANY['phone']}.</font>
         """

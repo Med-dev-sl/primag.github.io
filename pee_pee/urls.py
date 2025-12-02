@@ -17,6 +17,7 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 from django.views.generic.base import RedirectView
+from sales.views import sales_dashboard
 
 # Customize the default admin site - PriMag Enterprise
 admin.site.site_header = "PriMag Enterprise"
@@ -25,6 +26,7 @@ admin.site.index_title = "PriMag Enterprise Dashboard"
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('admin/sales/dashboard/', sales_dashboard, name='sales_dashboard'),
     # Redirect root URL to the admin login page so the landing page shows admin login
     path('', RedirectView.as_view(url='/admin/login/?next=/admin/')),
 ]
